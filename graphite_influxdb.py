@@ -217,15 +217,47 @@ class InfluxdbFinder(object):
         if not done:
             # regexes in influxdb are not assumed to be anchored, so anchor them explicitly
             regex = self.compile_regex('^{0}', query)
+            logger.debug("assure_series() Calling influxdb with query - %s", query.pattern)
+            path=query.pattern.split('.')
+            logger.debug("assure_series() path - %s", path)
             with self.statsd_client.timer('service_is_graphite-api.ext_service_is_influxdb.target_type_is_gauge.unit_is_ms.action_is_get_series'):
-                _query = "show series from /%s/" % regex.pattern
+                _query = "show series where t0 =~ /%s/" % self.my_compile_regex('^{0}$', path[0]).pattern
+                i=1
+                while i < len(path):
+                    _query += " AND t%i =~ /%s/" % (i, self.my_compile_regex('^{0}$', path[i]).pattern)
+                    i += 1
+                ret = self.client.query(_query, params=_INFLUXDB_CLIENT_PARAMS)
+                series = [self.my_convert_to_path(key_name['_key']) for key_name in ret.get_points()]
+
+                _query = "show series from /%s/" % self.my_compile_regex('^{0}$', path.pop()).pattern
+                if len(path) > 0:
+                    _query += " WHERE t0 =~ /%s/" % self.my_compile_regex('^{0}$', path[0]).pattern
+                    i=1
+                    while i < len(path):
+                        _query += " AND t%i =~ /%s/" % (i, self.my_compile_regex('^{0}$', path[i]).pattern)
+                        i += 1
                 logger.debug("assure_series() Calling influxdb with query - %s", _query)
                 ret = self.client.query(_query, params=_INFLUXDB_CLIENT_PARAMS)
-                # as long as influxdb doesn't have good safeguards against
-                # series with bad data in the metric names, we must filter out
-                # like so:
-                series = [key_name for (key_name,_) in ret.keys()]
+                series.extend([self.my_convert_to_path(key_name['_key']) for key_name in ret.get_points()])
         return series
+
+    def my_convert_to_path(self, series_key):
+        series_key = series_key.split(',')
+        path = []
+        for tag in series_key[1:]:
+            path.append(tag.split('=')[1])
+        path.append(series_key[0])
+        return '.'.join(path)
+
+    def my_compile_regex(self, fmt, query):
+        """Turn glob (graphite) queries into compiled regex
+        * becomes .*
+        . becomes \.
+        fmt argument is so that caller can control anchoring (must contain exactly 1 {0} !"""
+        return re.compile(fmt.format(
+            query.replace('.', '\.').replace('*', '[^\.]*').replace(
+                '{', '(').replace(',', '|').replace('}', ')')
+        ))
 
     def compile_regex(self, fmt, query):
         """Turn glob (graphite) queries into compiled regex
@@ -241,13 +273,21 @@ class InfluxdbFinder(object):
         key_leaves = "%s_leaves" % query.pattern
         series = self.assure_series(query)
         regex = self.compile_regex('^{0}$', query)
+        logger.debug("get_leaves() regex %s", regex.pattern)
         logger.debug("get_leaves() key %s", key_leaves)
         timer = self.statsd_client.timer('service_is_graphite-api.action_is_find_leaves.target_type_is_gauge.unit_is_ms')
         now = datetime.datetime.now()
         timer.start()
         # return every matching series and its
         # resolution (based on first pattern match in schema, fallback to 60s)
-        leaves = [(name, next((res for (patt, res) in self.schemas if patt.match(name)), 60))
+        leaves = [
+                    (
+                        name, next(
+                            (res 
+                                for (patt, res) in self.schemas if patt.match(name)
+                            ), 60
+                        )
+                    )
                   for name in series if regex.match(name)
                   ]
         timer.stop()
@@ -257,6 +297,7 @@ class InfluxdbFinder(object):
                      key_leaves,
                      dt.seconds,
                      dt.microseconds)
+        logger.debug("get_leaves() result %s", leaves)
         return leaves
 
     def get_branches(self, query):
@@ -297,6 +338,33 @@ class InfluxdbFinder(object):
                 logger.debug("Yielding branch %s" % (name,))
                 yield BranchNode(name)
 
+    def create_fetch_query(self, path, start_time, end_time, step):
+        path = path.split('.')
+        _query = "select mean(value) as value from /%s/ WHERE" % self.my_compile_regex('^{0}$', path.pop()).pattern
+        if len(path) > 0:
+            _query += " t0 =~ /%s/ AND" % self.my_compile_regex('^{0}$', path[0]).pattern
+            i=1
+            while i < len(path):
+                _query += " t%i =~ /%s/ AND" % (i, self.my_compile_regex('^{0}$', path[i]).pattern)
+                i += 1
+        _query += " (time > %ds and time <= %ds) GROUP BY time(%ss)" % (start_time, end_time, step)
+        return _query
+
+    def _my_make_graphite_api_points_list(self, influxdb_data, nodes):
+        """Make graphite-api data points dictionary from Influxdb ResultSet data"""
+        _data = {}
+        #logger.debug('_my_make_graphite_api_points_list() influxdb_data: %s', influxdb_data)
+        if len(influxdb_data) != len(nodes):
+            logger.error('_my_make_graphite_api_points_list: len(influxdb_data) != len(nodes)')
+        if len(influxdb_data) == 1 and type(influxdb_data) is not list:
+            influxdb_data = [ influxdb_data ]
+        i=0
+        while i < len(influxdb_data):
+            _data[nodes[i].path] = [d['value'] for d in influxdb_data[i].get_points()]
+            i += 1
+        #logger.debug('_my_make_graphite_api_points_list() RET: %s', _data)
+        return _data
+
     def fetch_multi(self, nodes, start_time, end_time):
         series = ', '.join(['"%s"' % node.path for node in nodes])
         # use the step of the node that is the most coarse
@@ -306,6 +374,7 @@ class InfluxdbFinder(object):
         step = max([node.reader.step for node in nodes])
         query = 'select mean(value) as value from %s where (time > %ds and time <= %ds) GROUP BY time(%ss)' % (
                 series, start_time, end_time, step)
+        query = '; '.join([self.create_fetch_query(node.path, start_time, end_time, step) for node in nodes])
         logger.debug('fetch_multi() query: %s', query)
         logger.debug('fetch_multi() - start_time: %s - end_time: %s, step %s',
                      datetime.datetime.fromtimestamp(float(start_time)), datetime.datetime.fromtimestamp(float(end_time)), step)
@@ -314,7 +383,9 @@ class InfluxdbFinder(object):
             logger.debug("Calling influxdb multi fetch with query - %s", query)
             data = self.client.query(query, params=_INFLUXDB_CLIENT_PARAMS)
         logger.debug('fetch_multi() - Retrieved %d result set(s)', len(data))
-        data = _make_graphite_api_points_list(data)
+        logger.debug('fetch_multi() - Retrieved result type %s', type(data))
+        data = self._my_make_graphite_api_points_list(data, nodes)
+        logger.debug('fetch_multi() - Retrieved %d result set(s)', len(data))
         # some series we requested might not be in the resultset.
         # this is because influx doesn't include series that had no values
         # this is a behavior that some people actually appreciate when graphing, but graphite doesn't do this (yet),
@@ -322,10 +393,7 @@ class InfluxdbFinder(object):
         # a better reason though, is because for advanced alerting cases like bosun, you want all entries even if they have no data, so you can properly
         # compare, join, or do logic with the targets returned for requests for the same data but from different time ranges, you want them to all
         # include the same keys.
-        query_keys = set([node.path for node in nodes])
-        for key in query_keys:
-            data.setdefault(key, [])
         time_info = start_time, end_time, step
-        for key in data:
-            data[key] = [v[1] for v in data[key]]
+        #logger.debug('fetch_multi() - time_info %s', time_info)
+        #logger.debug('fetch_multi() - data %s', data)
         return time_info, data
