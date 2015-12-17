@@ -313,7 +313,8 @@ class InfluxdbFinder(object):
         regex = self.compile_regex('^{0}', query)
         logger.debug("find_leaves() Calling influxdb with query - %s", query.pattern)
         path=query.pattern.split('.')
-        logger.debug("find_leaves() path - %s", path)
+        path_length = len(path)
+        logger.debug("find_leaves() path - %s (len: %s)", path, path_length)
         with self.statsd_client.timer('service_is_graphite-api.ext_service_is_influxdb.target_type_is_gauge.unit_is_ms.action_is_get_series'):
             _query = "show series from /%s/" % self.my_compile_regex('^{0}$', path.pop()).pattern
             if len(path) > 0:
@@ -324,7 +325,7 @@ class InfluxdbFinder(object):
                     i += 1
             logger.debug("find_leaves() Calling influxdb with query - %s", _query)
             ret = self.client.query(_query, params=_INFLUXDB_CLIENT_PARAMS)
-            series = [self.my_convert_to_path(key_name['_key']) for key_name in ret.get_points()]
+            series = [self.my_convert_to_path(key_name['_key']) for key_name in ret.get_points() if len(key_name['_key'].split(',')) == path_length]
         return series
 
     def get_branches (self, query):
