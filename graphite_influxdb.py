@@ -123,7 +123,7 @@ class InfluxdbReader(object):
             data = []
         time_info = start_time, end_time, self.step
         return time_info, [v[1] for v in data[self.path]]
-    
+
     def get_intervals(self):
         now = int(time.time())
         return IntervalSet([Interval(1, now)])
@@ -185,8 +185,15 @@ class InfluxdbFinder(object):
             logger.addHandler(handler)
             handler.setFormatter(formatter)
 
+    # This method SHOULD NOT be used anywhere anymore. It is superseeded
+    # by find_leaves and find_branches.
+    # We leave it here for now for the ES logic. It is not decided yet if
+    # we want to port this or discard it, but effectively for the moment
+    # there is no ES support
     def assure_series(self, query):
         key_series = "%s_series" % query.pattern
+        logger.error("assure_series() THIS METHOD SHOULD NOT BE CALLED - %s", key_series)
+        return
         done = False
         if self.es:
             # note: ES always treats a regex as anchored at start and end
@@ -271,10 +278,10 @@ class InfluxdbFinder(object):
 
     def get_leaves(self, query):
         key_leaves = "%s_leaves" % query.pattern
-        series = self.assure_series(query)
+        logger.debug("get_leaves() key %s", key_leaves)
+        series = self.find_leaves(query)
         regex = self.compile_regex('^{0}$', query)
         logger.debug("get_leaves() regex %s", regex.pattern)
-        logger.debug("get_leaves() key %s", key_leaves)
         timer = self.statsd_client.timer('service_is_graphite-api.action_is_find_leaves.target_type_is_gauge.unit_is_ms')
         now = datetime.datetime.now()
         timer.start()
@@ -283,7 +290,7 @@ class InfluxdbFinder(object):
         leaves = [
                     (
                         name, next(
-                            (res 
+                            (res
                                 for (patt, res) in self.schemas if patt.match(name)
                             ), 60
                         )
@@ -300,31 +307,45 @@ class InfluxdbFinder(object):
         logger.debug("get_leaves() result %s", leaves)
         return leaves
 
-    def get_branches(self, query):
-        seen_branches = set()
-        key_branches = "%s_branches" % query.pattern
-        # Very inefficient call to list
-        series = self.assure_series(query)
-        regex = self.compile_regex('^{0}$', query)
-        logger.debug("get_branches() %s", key_branches)
-        timer = self.statsd_client.timer('service_is_graphite-api.action_is_find_branches.target_type_is_gauge.unit_is_ms')
-        start_time = datetime.datetime.now()
-        timer.start()
-        branches = []
-        for name in series:
-            while '.' in name:
-                name = name.rsplit('.', 1)[0]
-                if name not in seen_branches:
-                    seen_branches.add(name)
-                    if regex.match(name) is not None:
-                        logger.debug("get_branches() %s found branch name: %s", key_branches, name)
-                        branches.append(name)
-        timer.stop()
-        end_time = datetime.datetime.now()
-        dt = end_time - start_time
-        logger.debug("get_branches() %s Finished find_branches in %s.%ss",
-                     key_branches,
-                     dt.seconds, dt.microseconds)
+    def find_leaves(self, query):
+        key_series = "%s_series" % query.pattern
+        # regexes in influxdb are not assumed to be anchored, so anchor them explicitly
+        regex = self.compile_regex('^{0}', query)
+        logger.debug("find_leaves() Calling influxdb with query - %s", query.pattern)
+        path=query.pattern.split('.')
+        logger.debug("find_leaves() path - %s", path)
+        with self.statsd_client.timer('service_is_graphite-api.ext_service_is_influxdb.target_type_is_gauge.unit_is_ms.action_is_get_series'):
+            _query = "show series from /%s/" % self.my_compile_regex('^{0}$', path.pop()).pattern
+            if len(path) > 0:
+                _query += " WHERE t0 =~ /%s/" % self.my_compile_regex('^{0}$', path[0]).pattern
+                i=1
+                while i < len(path):
+                    _query += " AND t%i =~ /%s/" % (i, self.my_compile_regex('^{0}$', path[i]).pattern)
+                    i += 1
+            logger.debug("find_leaves() Calling influxdb with query - %s", _query)
+            ret = self.client.query(_query, params=_INFLUXDB_CLIENT_PARAMS)
+            series = [self.my_convert_to_path(key_name['_key']) for key_name in ret.get_points()]
+        return series
+
+    def get_branches (self, query):
+        key_series = "%s_series" % query.pattern
+        # regexes in influxdb are not assumed to be anchored, so anchor them explicitly
+        regex = self.compile_regex('^{0}', query)
+        logger.debug("find_branches() Calling influxdb with query - %s", query.pattern)
+        path=query.pattern.split('.')
+        logger.debug("find_branches() path - %s", path)
+        key = "t%s" % (len(path)-1)
+        with self.statsd_client.timer('service_is_graphite-api.ext_service_is_influxdb.target_type_is_gauge.unit_is_ms.action_is_get_series'):
+            #_query = "show series where t0 =~ /%s/" % self.my_compile_regex('^{0}$', path[0]).pattern
+            _query = "show tag values from /.*/ with key = %s" % key
+            _query += " where t0 =~ /%s/"% self.my_compile_regex('^{0}$', path[0]).pattern
+            i=1
+            while i < len(path):
+                _query += " AND t%i =~ /%s/" % (i, self.my_compile_regex('^{0}$', path[i]).pattern)
+                i += 1
+            ret = self.client.query(_query, params=_INFLUXDB_CLIENT_PARAMS)
+            branches = [key_name[key] for key_name in ret.get_points()]
+        logger.debug("find_branches() result - %s", branches)
         return branches
 
     def find_nodes(self, query):
@@ -361,6 +382,7 @@ class InfluxdbFinder(object):
         i=0
         while i < len(influxdb_data):
             _data[nodes[i].path] = [d['value'] for d in influxdb_data[i].get_points()]
+            logger.debug('_my_make_graphite_api_points_list() %s: %s points', nodes[i].path, len(_data[nodes[i].path]))
             i += 1
         #logger.debug('_my_make_graphite_api_points_list() RET: %s', _data)
         return _data
