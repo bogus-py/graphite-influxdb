@@ -338,17 +338,27 @@ class InfluxdbFinder(object):
         key_series = "%s_series" % query.pattern
         # regexes in influxdb are not assumed to be anchored, so anchor them explicitly
         regex = self.compile_regex('^{0}', query)
-        logger.debug("find_branches() Calling influxdb with query - %s", query.pattern)
+        logger.debug("find_branches() Calling influxdb with pattern - %s", query.pattern)
         path=query.pattern.split('.')
         logger.debug("find_branches() path - %s", path)
         key = "t%s" % (len(path)-1)
         with self.statsd_client.timer('service_is_graphite-api.ext_service_is_influxdb.target_type_is_gauge.unit_is_ms.action_is_get_series'):
             #_query = "show series where t0 =~ /%s/" % self.my_compile_regex('^{0}$', path[0]).pattern
-            _query = "show tag values from /.*/ with key = %s" % key
+            _query = "show tag values with key = %s" % key
             _query += " where t0 =~ /%s/"% self.my_compile_regex('^{0}$', path[0]).pattern
             i=1
             while i < len(path):
-                _query += " AND t%i =~ /%s/" % (i, self.my_compile_regex('^{0}$', path[i]).pattern)
+                tag_value_pattern = self.my_compile_regex('^{0}$', path[i]).pattern
+                # Avoid matching on ^.*$. This is just wasted computing time, and actually makes queries a lot slower.
+                # Some Numbers:
+                # 1) show tag values with key = t3 where t0 =~ /^collectd$/ AND t1 =~ /^staging$/ AND t2 =~ /^cassandra-1$/ AND t3 =~ /^u[^\.]*$/
+                #    Takes 2-3s at first with cold cache, than ~0.7 with warm cache (~10 runs)
+                # 2) show tag values with key = t3 where t0 =~ /^collectd$/ AND t1 =~ /^staging$/ AND t2 =~ /^cassandra-1$/
+                #    takes ~2s with cold cache, than ~0.6 with warm cache (also ~10 runs
+                # 3) show tag values with key = t3 where t0 =~ /^collectd$/ AND t1 =~ /^staging$/ AND t2 =~ /^cassandra-1$/ AND t3 =~ /^[^\.]*$/'
+                #    takes consistently 17-19s over 10 tests (to big to cache?)
+                if tag_value_pattern != '^[^\.]*$':
+                    _query += " AND t%i =~ /%s/" % (i, tag_value_pattern)
                 i += 1
             ret = self.client.query(_query, params=_INFLUXDB_CLIENT_PARAMS)
             branches = [key_name[key] for key_name in ret.get_points()]
