@@ -53,8 +53,8 @@ In your graphite-api config file::
     finders:
       - graphite_influxdb.InfluxdbFinder
     influxdb:
-       host: localhost
-       port: 8086
+       host: 
+         - [localhost, 8086]
        user: graphite
        pass: graphite
        db:   graphite

@@ -3,7 +3,7 @@ import time
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import datetime
-from influxdb import InfluxDBClient
+from influxdb import InfluxDBClusterClient
 try:
     import statsd
 except ImportError:
@@ -50,7 +50,6 @@ def normalize_config(config=None):
     if config is not None:
         cfg = config.get('influxdb', {})
         ret['host'] = cfg.get('host', 'localhost')
-        ret['port'] = cfg.get('port', 8086)
         ret['user'] = cfg.get('user', 'graphite')
         ret['passw'] = cfg.get('pass', 'graphite')
         ret['db'] = cfg.get('db', 'graphite')
@@ -69,7 +68,6 @@ def normalize_config(config=None):
     else:
         from django.conf import settings
         ret['host'] = getattr(settings, 'INFLUXDB_HOST', 'localhost')
-        ret['port'] = getattr(settings, 'INFLUXDB_PORT', 8086)
         ret['user'] = getattr(settings, 'INFLUXDB_USER', 'graphite')
         ret['passw'] = getattr(settings, 'INFLUXDB_PASS', 'graphite')
         ret['db'] = getattr(settings, 'INFLUXDB_DB', 'graphite')
@@ -142,7 +140,7 @@ class InfluxdbFinder(object):
         # It turns what should be a load error into a runtime error
         config = normalize_config(config)
         self.config = config
-        self.client = InfluxDBClient(config['host'], config['port'], config['user'], config['passw'], config['db'], config['ssl'])
+        self.client = InfluxDBClusterClient(config['host'], config['user'], config['passw'], config['db'], config['ssl'])
         self.schemas = [(re.compile(patt), step) for (patt, step) in config['schema']]
         try:
             self.statsd_client = statsd.StatsClient(config['statsd'].get('host'),
