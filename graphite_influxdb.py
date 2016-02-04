@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+from math import floor
 from logging.handlers import TimedRotatingFileHandler
 import datetime
 from influxdb import InfluxDBClusterClient
@@ -56,6 +57,7 @@ def normalize_config(config=None):
         ssl = cfg.get('ssl', False)
         ret['ssl'] = (ssl == 'true')
         ret['schema'] = cfg.get('schema', [])
+        ret['min_data_points'] = cfg.get('min_data_points', 0)
         ret['log_file'] = cfg.get('log_file', None)
         ret['log_level'] = cfg.get('log_level', 'info')
         cfg = config.get('es', {})
@@ -74,6 +76,7 @@ def normalize_config(config=None):
         ssl = getattr(settings, 'INFLUXDB_SSL', False)
         ret['ssl'] = (ssl == 'true')
         ret['schema'] = getattr(settings, 'INFLUXDB_SCHEMA', [])
+        ret['min_data_points'] = getattr(settings, 'INFLUXDB_MIN_DATA_POINTS', 0)
         ret['log_file'] = getattr(
             settings, 'INFLUXDB_LOG_FILE', None)
         # Default log level is 'info'
@@ -410,7 +413,15 @@ class InfluxdbFinder(object):
         # not sure if there's a better way? can we combine series
         # with different steps (and use the optimal step for each?)
         # probably not
-        step = max([node.reader.step for node in nodes])
+        step_given = max([node.reader.step for node in nodes])
+        step = step_given
+        if self.config['min_data_points'] > 0:
+            #let's do "adaptive" res based on configured min_data_points
+            _step = (end_time - start_time) / self.config['min_data_points']
+            if _step > step_given:
+                #to reduce rounding errors always use a multiple of step_given
+                step = int(floor(_step/step_given)*step_given)
+        logger.debug("Calling influxdb multi fetch from %s to %s by %s: %s points", start_time, end_time, step, (end_time-start_time)/step)
         query = 'select mean(value) as value from %s where (time > %ds and time <= %ds) GROUP BY time(%ss)' % (
                 series, start_time, end_time, step)
         query = '; '.join([self.create_fetch_query(node.path, start_time, end_time, step) for node in nodes])
