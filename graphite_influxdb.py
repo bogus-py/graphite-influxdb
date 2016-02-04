@@ -249,8 +249,12 @@ class InfluxdbFinder(object):
     def my_convert_to_path(self, series_key):
         series_key = series_key.split(',')
         path = []
+        regex = re.compile('^t[0-9]+')
         for tag in series_key[1:]:
-            path.append(tag.split('=')[1])
+            tag_key, tag_value = tag.split('=')
+            #ignore tags that don't fit the pattern (like tn, version, region, etc).
+            if regex.match(tag_key):
+                path.append(tag_value)
         path.append(series_key[0])
         return '.'.join(path)
 
@@ -321,9 +325,13 @@ class InfluxdbFinder(object):
                 while i < len(path):
                     _query += " AND t%i =~ /%s/" % (i, self.my_compile_regex('^{0}$', path[i]).pattern)
                     i += 1
+                _query += " AND tn = '%i'" %( i-1)
+            else:
+                _query += " WHERE tn = '-1'"
             logger.debug("find_leaves() Calling influxdb with query - %s", _query)
             ret = self.client.query(_query, params=_INFLUXDB_CLIENT_PARAMS)
-            series = [self.my_convert_to_path(key_name['_key']) for key_name in ret.get_points() if len(key_name['_key'].split(',')) == path_length]
+            series = [self.my_convert_to_path(key_name['_key']) for key_name in ret.get_points()]
+            logger.debug("find_leaves() %i results", len(series))
         return series
 
     def get_branches (self, query):
