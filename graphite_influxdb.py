@@ -250,14 +250,15 @@ class InfluxdbFinder(object):
         return series
 
     def my_convert_to_path(self, series_key):
-        series_key = series_key.split(',')
+        series_key = re.split(r'(?<!\\),', series_key)
         path = []
-        regex = re.compile('^t[0-9]+')
+        regex = re.compile('^t[0-9]+=.+')
         for tag in series_key[1:]:
-            tag_key, tag_value = tag.split('=')
             #ignore tags that don't fit the pattern (like tn, version, region, etc).
-            if regex.match(tag_key):
+            if regex.match(tag):
+                tag_key, tag_value = tag.split('=')
                 path.append(tag_value)
+
         path.append(series_key[0])
         return '.'.join(path)
 
@@ -316,7 +317,7 @@ class InfluxdbFinder(object):
         key_series = "%s_series" % query.pattern
         # regexes in influxdb are not assumed to be anchored, so anchor them explicitly
         regex = self.compile_regex('^{0}', query)
-        logger.debug("find_leaves() Calling influxdb with query - %s", query.pattern)
+        logger.debug("find_leaves() Calling influxdb with pattern - %s", query.pattern)
         path=query.pattern.split('.')
         path_length = len(path)
         logger.debug("find_leaves() path - %s (len: %s)", path, path_length)
